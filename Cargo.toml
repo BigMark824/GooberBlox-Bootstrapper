@@ -2,7 +2,7 @@
 name = "GooberLauncher"
 version = "1.0.0"
 authors = ["luna","mathmark824"]
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 chrono = { version = "0.4.31" }
