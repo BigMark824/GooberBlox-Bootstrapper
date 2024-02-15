@@ -2,8 +2,9 @@ use anyhow::anyhow;
 use chrono::Local;
 use colored::*;
 use core::cmp::min;
+use crossterm::execute;
 use std::env::{self, args};
-use std::io::Cursor;
+use std::io::{stdout, Cursor};
 use std::path::Path;
 use std::process::Command;
 use std::thread::sleep;
@@ -20,6 +21,9 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use winreg::enums::*;
 use winreg::RegKey;
+
+const BASE_URL: &str = "goober.biz";
+const APPDATA_SUB: &str = "GooberBlox";
 
 fn print_advanced(mesg: &str, type_of_msg: i32) {
     match type_of_msg{
@@ -43,8 +47,8 @@ pub async fn http_get(client: &Client, url: &str) -> anyhow::Result<String> {
     Ok(response?.text().await?)
 }
 
-pub async fn download_file(client: &Client, url: &str) -> anyhow::Result<Vec<u8>> {
-    let response = client.get(url).send().await?;
+pub async fn download_file<T: AsRef<str>>(client: &Client, url: T) -> anyhow::Result<Vec<u8>> {
+    let response = client.get(url.as_ref()).send().await?;
     let content_length = response.content_length().unwrap_or(0) as usize;
 
     // Create a progress bar
@@ -83,9 +87,14 @@ pub async fn calculate_file_sha256(file_path: &Path) -> anyhow::Result<String> {
     Ok(format!("{:x}", sha256.finalize()))
 }
 
+/*
+    Whatever you do dont make this return a result;
+    for some reason rust freaks the f**k out
+*/
 #[tokio::main]
 async fn main() {
     clear_terminal_screen();
+    execute!(stdout(), crossterm::terminal::SetSize(85, 27)).expect("Failed to set TermSize");
 
     println!("{}", "Welcome to...".bold().green());
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -195,25 +204,24 @@ fn parse_launch_arguments() -> Option<LaunchArguments> {
 }
 
 async fn install_further() -> anyhow::Result<()> {
+    let setup_url: &str = &format!("setup.{}", BASE_URL);
+
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()
         .expect("Hard Error");
 
-    let base_url: &str = "goober.biz";
-    let setup_url: &str = &format!("setup.{}", base_url);
-    let mut exec_pathbuf = dirs::data_local_dir().expect("Hard Error");
-    let appdata_sub = "GooberBlox";
-    //let roblox_sub = "Roblox";
+    let exec_pathbuf = dirs::data_local_dir()
+        .expect("Hard Error")
+        .join(APPDATA_SUB);
 
-    exec_pathbuf.push(appdata_sub);
-    if !exec_pathbuf.join("Roblox").join("2016").exists()
-        || !exec_pathbuf.join("GooberLauncher.exe").exists()
-    {
-        let _ = create_dir_all(&exec_pathbuf.join("Roblox"));
+    let install_folder = exec_pathbuf.join("Roblox").join("2016");
+
+    if !install_folder.exists() || !exec_pathbuf.join("GooberLauncher.exe").exists() {
+        create_dir_all(exec_pathbuf.join("Roblox")).await?;
         let file_content = download_file(
             &http_client,
-            &format!("http://{}/GooberClient.zip", &setup_url),
+            format!("http://{}/GooberClient.zip", &setup_url),
         )
         .await?;
 
@@ -234,7 +242,6 @@ async fn install_further() -> anyhow::Result<()> {
 }
 
 async fn install() -> anyhow::Result<()> {
-    let appdata_sub: &str = "GooberBlox";
     let bootstrapper_filename: &str = "GooberLauncher.exe";
     let uri_scheme: &str = "goober-player";
 
@@ -242,7 +249,7 @@ async fn install() -> anyhow::Result<()> {
         RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Software\\Classes", KEY_WRITE)?;
     let exec_pathbuf = dirs::data_local_dir()
         .expect("Hard Error")
-        .join(&appdata_sub);
+        .join(APPDATA_SUB);
     if !exec_pathbuf.exists() {
         let _ = create_dir_all(&exec_pathbuf);
     };
