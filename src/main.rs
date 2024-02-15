@@ -1,10 +1,11 @@
 use chrono::Local;
 use colored::*;
+use core::cmp::min;
 use crossterm::execute;
 use std::env;
 use std::fs::{create_dir_all, File};
 use std::io::{stdout, Cursor, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::thread::sleep;
 use std::time::Duration;
@@ -12,19 +13,10 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::{self, Client};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use url::Url;
 use winreg::enums::*;
 use winreg::RegKey;
-
-#[derive(Debug, Deserialize)]
-struct HashResponse {
-    #[serde(rename = "LauncherHash")]
-    launcher_hash: String,
-    #[serde(rename = "ClientHash")]
-    client_hash: String,
-}
 
 fn print_advanced(mesg: &str, type_of_msg: i32) {
     match type_of_msg{
@@ -60,12 +52,12 @@ pub async fn http_get(client: &Client, url: &str) -> Result<String, reqwest::Err
     Ok(response.unwrap().text().await.unwrap())
 }
 
-pub async fn download_file(client: &Client, url: &str) -> Result<Vec<u8>, reqwest::Error> {
+pub async fn download_file(client: &Client, url: &str) -> anyhow::Result<Vec<u8>> {
     let response = client.get(url).send().await?;
-    let content_length = response.content_length().unwrap_or(0);
+    let content_length = response.content_length().unwrap_or(0) as usize;
 
     // Create a progress bar
-    let progress_bar = ProgressBar::new(content_length);
+    let progress_bar = ProgressBar::new(content_length as u64);
     progress_bar.set_style(
         ProgressStyle::default_bar()
             .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
@@ -75,73 +67,33 @@ pub async fn download_file(client: &Client, url: &str) -> Result<Vec<u8>, reqwes
 
     let mut file_content = Vec::new();
     let mut byte_stream = response.bytes_stream();
+    let mut downloaded = 0;
 
     while let Some(item) = byte_stream.next().await {
         let chunk = item?;
-        write_with_progress(&mut file_content, chunk.to_vec(), &progress_bar);
+        //write_with_progress(&mut file_content, chunk.to_vec(), &progress_bar);
+        file_content.write_all(&chunk)?;
+        downloaded = min(downloaded + chunk.len(), content_length);
+        progress_bar.set_position(downloaded as u64);
     }
 
     progress_bar.finish_and_clear();
     Ok(file_content)
 }
 
-fn write_with_progress(file_content: &mut Vec<u8>, chunk: Vec<u8>, progress_bar: &ProgressBar) {
-    #[cfg(target_os = "windows")]
-    {
-        seek_write_with_progress(file_content, chunk, progress_bar);
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        write_at_with_progress(file_content, chunk, progress_bar);
-    }
-}
-
-fn write_file(file_content: &[u8], path: &PathBuf) -> File {
-    let mut file = File::create(path).unwrap();
-    file.write_all(file_content).unwrap();
-    file
-}
-
-#[cfg(target_os = "windows")]
-fn seek_write_with_progress(
-    file_content: &mut Vec<u8>,
-    chunk: Vec<u8>,
-    progress_bar: &ProgressBar,
-) {
-    // Seek to the end of the file content and write the chunk
-    file_content.extend_from_slice(&chunk);
-
-    // Update progress bar
-    progress_bar.inc(chunk.len() as u64);
-}
-
-#[cfg(not(target_os = "windows"))]
-fn write_at_with_progress(file_content: &mut Vec<u8>, chunk: Vec<u8>, progress_bar: &ProgressBar) {
-    // Write the chunk at the end of the file content
-    file_content.extend_from_slice(&chunk);
-
-    // Update progress bar
-    progress_bar.inc(chunk.len() as u64);
-}
-
-pub async fn calculate_file_sha256(file_path: &Path) -> String {
+pub async fn calculate_file_sha256(file_path: &Path) -> anyhow::Result<String> {
     let mut sha256 = Sha256::new();
     let mut file = File::open(file_path).expect("Hard Error");
     let mut buffer = Vec::new();
 
-    file.read_to_end(&mut buffer);
+    file.read_to_end(&mut buffer)?;
     sha256.update(&buffer);
 
-    format!("{:x}", sha256.finalize())
+    Ok(format!("{:x}", sha256.finalize()))
 }
 
 #[tokio::main]
-async fn main() {
-    let http_client = reqwest::Client::builder()
-        .timeout(Duration::new(18446744073709551614, 0))
-        .build()
-        .expect("Hard Error");
-
+async fn main() -> anyhow::Result<()> {
     clear_terminal_screen();
     execute!(stdout(), crossterm::terminal::SetSize(85, 27)).unwrap();
 
@@ -215,111 +167,15 @@ async fn main() {
         }
     } else {
         //install mode
-        install().await;
+        install().await?;
     };
     print_advanced("Tasks done!", 0);
     sleep(Duration::new(3, 0));
+
+    Ok(())
 }
 
-async fn hash_check(http_client: Client) {
-    let base_url: &str = "goober.biz";
-    let setup_url: &str = &format!("setup.{}", base_url);
-    let mut exec_pathbuf = dirs::data_local_dir()
-        .expect("Hard Error")
-        .join("GooberBlox");
-    let mut playerbeta_path = exec_pathbuf.join("Roblox").join("2016");
-    playerbeta_path.push("GooberPlayerBeta.exe");
-    let playerbeta_hash_on_disk: &str = "none";
-    let launcher_hash_on_appdata: &str = "none";
-    let _ = create_dir_all(&exec_pathbuf.join("Roblox"));
-    if !playerbeta_path.exists() {
-        let playerbeta_hash_on_disk = "TEST";
-    } else {
-        let playerbeta_hash_on_disk: String = calculate_file_sha256(&playerbeta_path).await;
-    }
-    if !exec_pathbuf.join("GooberLauncher.exe").exists() {
-        let launcher_hash_on_appdata: String =
-            calculate_file_sha256(&env::current_exe().expect("Hard Error")).await;
-    } else {
-        let launcher_hash_on_appdata: String =
-            calculate_file_sha256(&exec_pathbuf.join("GooberLauncher.exe")).await;
-    }
-    let launcher_hash_on_disk: String =
-        calculate_file_sha256(&env::current_exe().expect("Hard Error")).await;
-    let hash_on_web = http_get(
-        &http_client,
-        &format!("http://{}/game/game-version", &base_url),
-    )
-    .await
-    .expect("Hard Error");
-
-    match serde_json::from_str::<HashResponse>(&hash_on_web) {
-        Ok(hash_response) => {
-            let client_hash = hash_response.client_hash;
-            let launcher_hash = hash_response.launcher_hash;
-            if client_hash == playerbeta_hash_on_disk || playerbeta_hash_on_disk != "TEST" {
-                print_advanced("Client is up-to-date!", 0)
-            } else {
-                print_advanced("Client is out-of-date or corrupted, redownloading..", 0);
-                let file_content = Cursor::new(
-                    download_file(
-                        &http_client,
-                        &format!("http://{}/GooberClientE.zip", &setup_url),
-                    )
-                    .await
-                    .unwrap(),
-                );
-
-                let _ = std::fs::remove_dir_all(&exec_pathbuf.join("Roblox").join("2016"));
-                print_advanced("Extracting...", 0);
-                match zip_extract::extract(
-                    file_content,
-                    &exec_pathbuf.join("Roblox").join("2016"),
-                    true,
-                ) {
-                    Ok(_) => {
-                        print_advanced("Extraction finished!", 0);
-                        let file_content: Vec<u8> = download_file(
-                            &http_client,
-                            &format!("http://{}/2016-RobloxAppE.exe", &base_url),
-                        )
-                        .await
-                        .unwrap();
-                        write_file(
-                            &file_content,
-                            &exec_pathbuf
-                                .join("Roblox")
-                                .join("2016")
-                                .join("GooberPlayerBeta.exe"),
-                        );
-                        print_advanced("Installation finished!", 0);
-                    }
-                    Err(err) => {
-                        let _ = std::fs::remove_dir_all(&exec_pathbuf.join("Roblox").join("2016"));
-                        eprintln!("Error during extraction: {:?}", err)
-                    }
-                }
-            }
-            if launcher_hash == launcher_hash_on_disk {
-                print_advanced("Launcher is up-to-date.", 0)
-            } else {
-                print_advanced("Please re-download the launcher from the site.", 1)
-            }
-            if launcher_hash_on_disk != launcher_hash_on_appdata {
-                if let Ok(executable_path) = &env::current_exe() {
-                    if let Ok(_executable_file) = std::fs::File::open(&executable_path) {
-                        sleep(Duration::from_secs(2));
-                        copy_executable(&executable_path, &exec_pathbuf.join("GooberLauncher.exe"));
-                        //async { install_further("2016").await }.await;
-                    }
-                }
-            }
-        }
-        Err(err) => eprintln!("Error deserializing JSON: {}", err),
-    }
-}
-
-async fn install_further(year: &str) {
+async fn install_further() {
     let http_client = reqwest::Client::builder()
         .timeout(Duration::new(18446744073709551614, 0))
         .build()
@@ -367,7 +223,7 @@ async fn install() -> Result<String, reqwest::Error> {
     let hkcu_classes_key: RegKey = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags("Software\\Classes", KEY_WRITE)
         .unwrap();
-    let mut exec_pathbuf = dirs::data_local_dir()
+    let exec_pathbuf = dirs::data_local_dir()
         .expect("Hard Error")
         .join(&appdata_sub);
     if !exec_pathbuf.exists() {
@@ -380,7 +236,7 @@ async fn install() -> Result<String, reqwest::Error> {
             if let Ok(_executable_file) = std::fs::File::open(&executable_path) {
                 if copy_executable(&executable_path, &exec_pathbuf.join(&bootstrapper_filename)) {
                     print_advanced("Starting installation..", 0);
-                    install_further("2016").await;
+                    install_further().await;
                 } else {
                     panic!("Unable to install, make a ticket for help.");
                 }

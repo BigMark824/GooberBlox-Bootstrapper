@@ -1,5 +1,5 @@
 [package]
-name = "GooberLauncher"
+name = "goober_launcher"
 version = "1.0.0"
 authors = ["luna", "mathmark824", "MojaveMF"]
 edition = "2021"
@@ -17,7 +17,5 @@ indicatif = "0.17.7"
 colored = "2.1.0"
 crossterm = "0.27.0"
 dirs = "5.0.1"
-serde = { version = "1.0.196", features = ["derive"] }
-serde_json = "1.0.113"
 futures-util = "0.3.30"
 sha2 = "0.10.8"
