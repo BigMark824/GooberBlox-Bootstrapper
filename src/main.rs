@@ -97,7 +97,9 @@ async fn main() {
     execute!(stdout(), crossterm::terminal::SetSize(85, 27)).expect("Failed to set TermSize");
 
     println!("{}", "Welcome to...".bold().green());
-    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    /* No one wants to wait 2s man */
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     println!(
         "{}{}",
