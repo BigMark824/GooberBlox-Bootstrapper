@@ -27,20 +27,7 @@ fn print_advanced(mesg: &str, type_of_msg: i32) {
 }
 
 pub fn clear_terminal_screen() {
-    if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/c", "cls"])
-            .spawn()
-            .expect("cls command failed to start")
-            .wait()
-            .expect("failed to wait");
-    } else {
-        Command::new("clear")
-            .spawn()
-            .expect("clear command failed to start")
-            .wait()
-            .expect("failed to wait");
-    };
+    println!("\033[2J")
 }
 
 pub async fn http_get(client: &Client, url: &str) -> Result<String, reqwest::Error> {
