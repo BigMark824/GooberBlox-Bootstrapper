@@ -1,29 +1,23 @@
 [package]
 name = "GooberLauncher"
 version = "1.0.0"
-authors = ["luna","mathmark824"]
+authors = ["luna", "mathmark824", "MojaveMF"]
 edition = "2021"
 
 [dependencies]
 chrono = { version = "0.4.31" }
-dirs = "5.0.1"
 reqwest = { version = "0.11.22", features = ["stream"] }
 md5 = "0.7.0"
 zip-extract = "0.1.2"
 winreg = "0.52.0"
-futures-util = "0.3.29"
 tokio = { version = "1.35.0", features = ["full"] }
 url = "2.5.0"
-walkdir = "2.4.0"
-sha2 = "0.10.8"
-serde = "1.0.193"
-serde_json = "1.0.108"
-serde_derive = "1.0.193"
-unrar = "0.5.2"
-tempdir = "0.3.7"
-bytes = "1.5.0"
 anyhow = "1.0.75"
 indicatif = "0.17.7"
 colored = "2.1.0"
 crossterm = "0.27.0"
-async-recursion = "1.0.5"
+dirs = "5.0.1"
+serde = { version = "1.0.196", features = ["derive"] }
+serde_json = "1.0.113"
+futures-util = "0.3.30"
+sha2 = "0.10.8"
