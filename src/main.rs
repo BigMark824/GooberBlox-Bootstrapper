@@ -253,7 +253,7 @@ async fn install() -> anyhow::Result<()> {
         .expect("Hard Error")
         .join(APPDATA_SUB);
     if !exec_pathbuf.exists() {
-        let _ = create_dir_all(&exec_pathbuf);
+        create_dir_all(&exec_pathbuf).await?;
     };
     if exec_pathbuf.join("Roblox").join("2016").exists()
         || exec_pathbuf.join(&bootstrapper_filename).exists()
