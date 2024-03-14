@@ -1,29 +1,29 @@
-use anyhow::anyhow;
-use chrono::Local;
-use colored::*;
-use core::cmp::min;
-use crossterm::execute;
-use std::env::{self, args};
-use std::io::{stdout, Cursor};
-use std::path::Path;
-use std::process::Command;
 use std::thread::sleep;
+use std::fs::{create_dir_all, File};
+use std::path::{Path, PathBuf};
+use std::io::{Write, Read, Cursor, stdout};
+use std::process::Command;
+use std::env;
 use std::time::Duration;
-use tokio::fs::copy;
-use tokio::fs::{create_dir_all, File};
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
+use chrono::Local;
+use async_recursion::async_recursion;
+use colored::*;
+use crossterm::execute;
 
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::{self, Client};
 use sha2::{Digest, Sha256};
+use reqwest::{self, Client};
 use url::Url;
+use serde_derive::Deserialize;
 use winreg::enums::*;
 use winreg::RegKey;
 
-const BASE_URL: &str = "goober.biz";
-const APPDATA_SUB: &str = "GooberBlox";
+#[derive(Debug, Deserialize)]
+struct HashResponse {
+    LauncherHash: String,
+    ClientHash: String,
+}
 
 fn print_advanced(mesg: &str, type_of_msg: i32) {
     match type_of_msg{
@@ -31,28 +31,42 @@ fn print_advanced(mesg: &str, type_of_msg: i32) {
         1 /* error */ => println!("{}", format!("[{}] [{}] {}", Local::now(), "error".red(), mesg)),
         _ => unimplemented!()
     };
+    
 }
+
 
 pub fn clear_terminal_screen() {
-    print!("{}[2J", 27 as char); /* Use ansi */
+    if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(["/c", "cls"])
+            .spawn()
+            .expect("cls command failed to start")
+            .wait()
+            .expect("failed to wait");
+    } else {
+        Command::new("clear")
+            .spawn()
+            .expect("clear command failed to start")
+            .wait()
+            .expect("failed to wait");
+    };
 }
 
-pub async fn http_get(client: &Client, url: &str) -> anyhow::Result<String> {
+pub async fn http_get(client: &Client, url: &str) -> Result<String, reqwest::Error> {
     let response = client.get(url).send().await;
     if let Err(err) = response {
         println!("Unable to visit {}", url);
-        return Err(err.into());
+        return Err(err);
     }
-
-    Ok(response?.text().await?)
+    Ok(response.unwrap().text().await.unwrap())
 }
 
-pub async fn download_file<T: AsRef<str>>(client: &Client, url: T) -> anyhow::Result<Vec<u8>> {
-    let response = client.get(url.as_ref()).send().await?;
-    let content_length = response.content_length().unwrap_or(0) as usize;
+pub async fn download_file(client: &Client, url: &str) -> Result<Vec<u8>, reqwest::Error> {
+    let response = client.get(url).send().await?;
+    let content_length = response.content_length().unwrap_or(0);
 
     // Create a progress bar
-    let progress_bar = ProgressBar::new(content_length as u64);
+    let progress_bar = ProgressBar::new(content_length);
     progress_bar.set_style(
         ProgressStyle::default_bar()
             .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
@@ -62,77 +76,88 @@ pub async fn download_file<T: AsRef<str>>(client: &Client, url: T) -> anyhow::Re
 
     let mut file_content = Vec::new();
     let mut byte_stream = response.bytes_stream();
-    let mut downloaded = 0;
 
     while let Some(item) = byte_stream.next().await {
         let chunk = item?;
-        //write_with_progress(&mut file_content, chunk.to_vec(), &progress_bar);
-        file_content.write_all(&chunk).await?;
-        downloaded = min(downloaded + chunk.len(), content_length);
-        progress_bar.set_position(downloaded as u64);
+        write_with_progress(&mut file_content, chunk.to_vec(), &progress_bar);
     }
 
     progress_bar.finish_and_clear();
     Ok(file_content)
 }
 
-pub async fn calculate_file_sha256(file_path: &Path) -> anyhow::Result<String> {
-    let mut sha256 = Sha256::new();
-    let mut file = File::open(file_path).await.expect("Hard Error");
-    let mut buffer = Vec::new();
-
-    file.read_to_end(&mut buffer).await?;
-    sha256.update(&buffer);
-
-    Ok(format!("{:x}", sha256.finalize()))
+fn write_with_progress(file_content: &mut Vec<u8>, chunk: Vec<u8>, progress_bar: &ProgressBar) {
+    #[cfg(target_os = "windows")]
+    {
+        seek_write_with_progress(file_content, chunk, progress_bar);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        write_at_with_progress(file_content, chunk, progress_bar);
+    }
 }
 
-/*
-    Whatever you do dont make this return a result;
-    for some reason rust freaks the f**k out
-*/
+fn write_file(file_content: &[u8], path: &PathBuf) -> File {
+    let mut file = File::create(path).unwrap();
+    file.write_all(file_content).unwrap();
+    file
+}
+
+#[cfg(target_os = "windows")]
+fn seek_write_with_progress(file_content: &mut Vec<u8>, chunk: Vec<u8>, progress_bar: &ProgressBar) {
+    // Seek to the end of the file content and write the chunk
+    file_content.extend_from_slice(&chunk);
+
+    // Update progress bar
+    progress_bar.inc(chunk.len() as u64);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn write_at_with_progress(file_content: &mut Vec<u8>, chunk: Vec<u8>, progress_bar: &ProgressBar) {
+    // Write the chunk at the end of the file content
+    file_content.extend_from_slice(&chunk);
+
+    // Update progress bar
+    progress_bar.inc(chunk.len() as u64);
+}
+
+
+pub async fn calculate_file_sha256(file_path: &Path) -> String {
+    let mut sha256 = Sha256::new();
+    let mut file = File::open(file_path).expect("Hard Error");
+    let mut buffer = Vec::new();
+
+    file.read_to_end(&mut buffer);
+    sha256.update(&buffer);
+
+    format!("{:x}", sha256.finalize())
+}
+
+
+
+
+
 #[tokio::main]
 async fn main() {
+    let http_client = reqwest::Client::builder()
+    .timeout(Duration::new(18446744073709551614, 0))
+    .build()
+    .expect("Hard Error");
+    
     clear_terminal_screen();
-    execute!(stdout(), crossterm::terminal::SetSize(85, 27)).expect("Failed to set TermSize");
+    execute!(stdout(), crossterm::terminal::SetSize(85, 27)).unwrap();
 
     println!("{}", "Welcome to...".bold().green());
-
-    /* No one wants to wait 2s man */
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    println!(
-        "{}{}",
-        " ██████╗  ██████╗  ██████╗ ██████╗ ███████╗██████╗ ".green(),
-        "██████╗ ██╗      ██████╗ ██╗  ██╗".blue()
-    );
-    println!(
-        "{}{}",
-        "██╔════╝ ██╔═══██╗██╔═══██╗██╔══██╗██╔════╝██╔══██╗".green(),
-        "██╔══██╗██║     ██╔═══██╗╚██╗██╔╝".blue()
-    );
-    println!(
-        "{}{}",
-        "██║  ███╗██║   ██║██║   ██║██████╔╝█████╗  ██████╔╝".green(),
-        "██████╔╝██║     ██║   ██║ ╚███╔╝".blue()
-    );
-    println!(
-        "{}{}",
-        "██║   ██║██║   ██║██║   ██║██╔══██╗██╔══╝  ██╔══██╗".green(),
-        "██╔══██╗██║     ██║   ██║ ██╔██╗ ".blue()
-    );
-    println!(
-        "{}{}",
-        "╚██████╔╝╚██████╔╝╚██████╔╝██████╔╝███████╗██║  ██║".green(),
-        "██████╔╝███████╗╚██████╔╝██╔╝ ██".blue()
-    );
-    println!(
-        "{}{}",
-        "╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝".green(),
-        "╚═════╝ ╚══════╝ ╚═════╝ ╚═╝  ╚═╝".blue()
-    );
+    let line1 = format!("{}{}", " ██████╗  ██████╗  ██████╗ ██████╗ ███████╗██████╗ ".green(), "██████╗ ██╗      ██████╗ ██╗  ██╗".blue());
+    let line2 = format!("{}{}", "██╔════╝ ██╔═══██╗██╔═══██╗██╔══██╗██╔════╝██╔══██╗".green(), "██╔══██╗██║     ██╔═══██╗╚██╗██╔╝".blue());
+    let line3 = format!("{}{}", "██║  ███╗██║   ██║██║   ██║██████╔╝█████╗  ██████╔╝".green(), "██████╔╝██║     ██║   ██║ ╚███╔╝".blue());
+    let line4 = format!("{}{}", "██║   ██║██║   ██║██║   ██║██╔══██╗██╔══╝  ██╔══██╗".green(), "██╔══██╗██║     ██║   ██║ ██╔██╗ ".blue());
+    let line5 = format!("{}{}", "╚██████╔╝╚██████╔╝╚██████╔╝██████╔╝███████╗██║  ██║".green(), "██████╔╝███████╗╚██████╔╝██╔╝ ██".blue());
+    let line6 = format!("{}{}", "╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝".green(), "╚═════╝ ╚══════╝ ╚═════╝ ╚═╝  ╚═╝".blue());
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    println!("{}\n{}\n{}\n{}\n{}\n{}", line1, line2, line3, line4, line5, line6);
     println!("Did you know that the current date is {}?\n", Local::now());
-
+    
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 {
         //play mode
@@ -141,160 +166,198 @@ async fn main() {
             if arg.starts_with("goober-player:///?") {
                 //hash_check(http_client.clone()).await;
                 // ARGS FOUND!
-                let Some(uri) = parse_launch_arguments() else {
-                    eprintln!("Invalid Launch arguments");
-                    return;
-                };
+                let uri_str = arg;
+                if let Ok(url) = Url::parse(&uri_str) {
+                    let placeid = get_query_param(&url, "placeid");
+                    let player_token = get_query_param(&url, "auth");
+                    let game = get_query_param(&url, "game");
+                    let mut playerbeta_path = dirs::data_local_dir().expect("Err");
+                    playerbeta_path.push("GooberBlox");
+                    playerbeta_path.push("Roblox");
+                    playerbeta_path.push("2016");
+                    playerbeta_path.push("GooberPlayerBeta.exe");
 
-                let playerbeta_path = dirs::data_local_dir()
-                    .expect("Err")
-                    .join("GooberBlox")
-                    .join("Roblox")
-                    .join("2016")
-                    .join("GooberPlayerBeta.exe");
-
-                let _playerbeta = Command::new(playerbeta_path)
-                    .args([r"--authenticationUrl",r"http://goober.biz/login/negotiate.ashx",r"--authenticationTicket",&uri.token,r"--joinScriptUrl",&format!(r"http://www.goober.biz/game/newcl/join.ashx?placeid={}&auth={}&game={}",uri.place,uri.token,uri.game)])
+                    let _playerbeta = Command::new(playerbeta_path)
+                    .args([r"--authenticationUrl",r"http://goober.biz/login/negotiate.ashx",r"--authenticationTicket",&player_token,r"--joinScriptUrl",&format!(r"http://assetgema.goober.biz/game/placelauncher.ashx?request=RequestGame&placeId={placeid}&auth={player_token}&game={game}")])
                     .arg(r"--play")
                     .spawn()
                     .expect("Failed to start playerbeta!");
-                print_advanced("Launched client!", 0);
+                print_advanced("Launched client!", 0)
+                } else {
+                    eprintln!("Invalid URI: {}", uri_str);
+                }
             }
         }
-    } else {
-        install().await.expect("Failed to install");
+    }
+    else {
+        //install mode
+        install().await;
     };
     print_advanced("Tasks done!", 0);
-    sleep(Duration::new(3, 0));
+    sleep(Duration::new(3,0));
 }
 
-struct LaunchArguments {
-    pub place: String,
-    pub token: String,
-    pub game: String,
-}
-
-fn parse_launch_arguments() -> Option<LaunchArguments> {
-    let argument_url = args()
-        .filter_map(|v| Url::parse(&v).ok())
-        .collect::<Vec<Url>>()
-        .pop()?;
-
-    let mut argument = argument_url.query_pairs();
-
-    let mut place = None;
-    let mut token = None;
-    let mut game = None;
-
-    while let Some((name, value)) = argument.next() {
-        let name = name.to_string();
-        let value = value.to_string();
-
-        match name.as_str() {
-            "placeid" => place = Some(value),
-            "auth" => token = Some(value),
-            "game" => game = Some(value),
-            _ => continue,
-        }
+async fn hash_check(http_client: Client) {
+    let base_url: &str = "goober.biz";
+    let setup_url : &str = &format!("setup.{}", base_url);
+    let mut exec_pathbuf = dirs::data_local_dir().expect("Hard Error").join("GooberBlox");
+    let mut playerbeta_path = exec_pathbuf.join("Roblox").join("2016");
+    playerbeta_path.push("GooberPlayerBeta.exe");
+    let playerbeta_hash_on_disk: &str = "none";
+    let launcher_hash_on_appdata: &str = "none";
+    let _ = create_dir_all(&exec_pathbuf.join("Roblox"));
+    if !playerbeta_path.exists() { 
+        let playerbeta_hash_on_disk = "TEST";
     }
+    else {
+    let playerbeta_hash_on_disk: String = calculate_file_sha256(&playerbeta_path).await;
+    }
+    if !exec_pathbuf.join("GooberLauncher.exe").exists() {
+     let launcher_hash_on_appdata: String = calculate_file_sha256(&env::current_exe().expect("Hard Error")).await;
+    }
+    else {
+        let launcher_hash_on_appdata: String = calculate_file_sha256(&exec_pathbuf.join("GooberLauncher.exe")).await;
+    }
+    let launcher_hash_on_disk: String = calculate_file_sha256(&env::current_exe().expect("Hard Error")).await;
+    let hash_on_web = http_get(&http_client, &format!("http://{}/game/game-version",&base_url)).await.expect("Hard Error");
 
-    Some(LaunchArguments {
-        place: place?,
-        token: token?,
-        game: game?,
-    })
+
+    match serde_json::from_str::<HashResponse>(&hash_on_web) {
+        Ok(hash_response) => {
+            let client_hash = hash_response.ClientHash;
+            let launcher_hash = hash_response.LauncherHash;
+            if client_hash==playerbeta_hash_on_disk || playerbeta_hash_on_disk!="TEST" {
+                print_advanced("Client is up-to-date!", 0)
+            }
+            else {
+                print_advanced("Client is out-of-date or corrupted, redownloading..", 0);
+                let file_content = Cursor::new(download_file(&http_client, &format!("http://{}/GooberClientE.zip",&setup_url)).await.unwrap());
+
+                let _ = std::fs::remove_dir_all(&exec_pathbuf.join("Roblox").join("2016"));
+                print_advanced("Extracting...", 0);
+                match zip_extract::extract(file_content, &exec_pathbuf.join("Roblox").join("2016"), true) {
+                    Ok(_) => { 
+                        print_advanced("Extraction finished!", 0);
+                        let file_content: Vec<u8> = download_file(&http_client, &format!("http://{}/2016-RobloxAppE.exe",&base_url)).await.unwrap();
+                        write_file(&file_content, &exec_pathbuf.join("Roblox").join("2016").join("GooberPlayerBeta.exe"), );
+                        print_advanced("Installation finished!", 0);
+                    },
+                    Err(err) => { 
+                        let _ =  std::fs::remove_dir_all(&exec_pathbuf.join("Roblox").join("2016")); 
+                        eprintln!("Error during extraction: {:?}", err) 
+                    },
+                }
+            }
+            if launcher_hash==launcher_hash_on_disk {
+                print_advanced("Launcher is up-to-date.", 0)
+            }
+            else {
+                print_advanced("Please re-download the launcher from the site.", 1)
+            }
+            if launcher_hash_on_disk!=launcher_hash_on_appdata {
+                if let Ok(executable_path) = &env::current_exe() {
+                    if let Ok(_executable_file) = std::fs::File::open(&executable_path) {
+                        sleep(Duration::from_secs(2));
+                copy_executable(&executable_path, &exec_pathbuf.join("GooberLauncher.exe"));
+                //async { install_further("2016").await }.await;
+                    }
+                }
+            }
+        }
+        Err(err) => eprintln!("Error deserializing JSON: {}", err),
+    }
 }
 
-async fn install_further() -> anyhow::Result<()> {
-    let setup_url: &str = &format!("setup.{}", BASE_URL);
 
+#[async_recursion]
+async fn install_further(year: &str) {
     let http_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .expect("Hard Error");
+    .timeout(Duration::new(18446744073709551614, 0))
+    .build()
+    .expect("Hard Error");
+    
+    let base_url: &str = "goober.biz";
+    let setup_url : &str = &format!("setup.{}", base_url);
+    let mut exec_pathbuf = dirs::data_local_dir().expect("Hard Error");
+    let appdata_sub = "GooberBlox";
+    //let roblox_sub = "Roblox";
 
-    let exec_pathbuf = dirs::data_local_dir()
-        .expect("Hard Error")
-        .join(APPDATA_SUB);
+    exec_pathbuf.push(appdata_sub);
+    if !exec_pathbuf.join("Roblox").join("2016").exists() || !exec_pathbuf.join("GooberLauncher.exe").exists() {
+        let _ = create_dir_all(&exec_pathbuf.join("Roblox"));
+        let file_content = download_file(&http_client, &format!("http://{}/GooberClient.zip",&setup_url)).await.unwrap();
 
-    let install_folder = exec_pathbuf.join("Roblox").join("2016");
-
-    if !install_folder.exists() || !exec_pathbuf.join("GooberLauncher.exe").exists() {
-        create_dir_all(exec_pathbuf.join("Roblox")).await?;
-        let file_content = download_file(
-            &http_client,
-            format!("http://{}/GooberClient.zip", &setup_url),
-        )
-        .await?;
-
-        if let Err(err) = zip_extract::extract(
-            Cursor::new(file_content),
-            &exec_pathbuf.join("Roblox").join("2016"),
-            true,
-        ) {
-            std::fs::remove_dir_all(&exec_pathbuf.join("Roblox").join("2016"))?;
-            eprintln!("Error during extraction {:?}", err);
-            return Err(anyhow!("Error during extraction {:?}", err));
+        match zip_extract::extract(Cursor::new(file_content), &exec_pathbuf.join("Roblox").join("2016"), true) {
+            Ok(_) => { print_advanced("Installation finished..", 0) },
+            Err(err) => { 
+                let _ =  std::fs::remove_dir_all(&exec_pathbuf.join("Roblox").join("2016")); 
+                eprintln!("Error during extraction: {:?}", err) 
+            },
         }
-
-        print_advanced("Client installed", 0)
     }
-
-    Ok(())
+    else {
+        //hash_check(http_client).await;
+    }
 }
 
-async fn install() -> anyhow::Result<()> {
-    let bootstrapper_filename: &str = "GooberLauncher.exe";
+async fn install() -> Result<String, reqwest::Error> {
+    let appdata_sub: &str = "GooberBlox";
+    let bootstrapper_filename :&str = "GooberLauncher.exe";
     let uri_scheme: &str = "goober-player";
-
-    let hkcu_classes_key: RegKey =
-        RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Software\\Classes", KEY_WRITE)?;
-    let exec_pathbuf = dirs::data_local_dir()
-        .expect("Hard Error")
-        .join(APPDATA_SUB);
+    
+    let hkcu_classes_key: RegKey = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Software\\Classes", KEY_WRITE).unwrap();
+    let mut exec_pathbuf = dirs::data_local_dir().expect("Hard Error").join(&appdata_sub);
     if !exec_pathbuf.exists() {
-        create_dir_all(&exec_pathbuf).await?;
+        let _ = create_dir_all(&exec_pathbuf);
     };
-    if exec_pathbuf.join("Roblox").join("2016").exists()
-        || exec_pathbuf.join(&bootstrapper_filename).exists()
-    {
-        return Ok(());
+    if !exec_pathbuf.join("Roblox").join("2016").exists() || !exec_pathbuf.join(&bootstrapper_filename).exists() {
+        if let Ok(executable_path) = &env::current_exe() {
+            if let Ok(_executable_file) = std::fs::File::open(&executable_path) {
+            if copy_executable(&executable_path, &exec_pathbuf.join(&bootstrapper_filename)) {
+                print_advanced("Starting installation..", 0);
+                install_further("2016").await;
+            }
+            else {
+                panic!("Unable to install, make a ticket for help.");
+            }
+            }
+            else {
+                eprintln!("executable path couldnt be grabbed");
+            }
+        }
     }
+    let exec_keypath: String = format!("\"{}\" \"%1\"", &exec_pathbuf.join(&bootstrapper_filename).display());
 
-    let executable_path = env::current_exe()?;
-
-    if let Err(err) = copy(executable_path, exec_pathbuf.join(bootstrapper_filename)).await {
-        eprintln!("Error copying executable: {:?}", err);
-        panic!("Unable to install, make a ticket for help.");
-    }
-
-    print_advanced("Starting installation..", 0);
-    install_further().await?;
-
-    let exec_keypath: String = format!(
-        "\"{}\" \"%1\"",
-        &exec_pathbuf.join(&bootstrapper_filename).display()
-    );
-
-    let scheme_key_result: Result<(RegKey, RegDisposition), _> =
-        hkcu_classes_key.create_subkey_with_flags(uri_scheme, KEY_WRITE);
+    let scheme_key_result: Result<(RegKey, RegDisposition), _> = hkcu_classes_key.create_subkey_with_flags(uri_scheme, KEY_WRITE);
     match scheme_key_result {
         Ok((scheme_key, _)) => {
-            scheme_key.set_value("", &format!("URL {} Protocol", uri_scheme))?;
-            scheme_key.set_value("URL Protocol", &"")?;
+            scheme_key.set_value("", &format!("URL {} Protocol", uri_scheme)).unwrap();
+            scheme_key.set_value("URL Protocol", &"").unwrap();
 
-            let (command_key, _) =
-                scheme_key.create_subkey_with_flags("shell\\open\\command", KEY_WRITE)?;
-            command_key.set_value("", &exec_keypath)?;
+            let (command_key,_) = scheme_key.create_subkey_with_flags("shell\\open\\command", KEY_WRITE).unwrap();
+            command_key.set_value("", &exec_keypath).unwrap();
 
-            let _icon_key = scheme_key.create_subkey_with_flags("DefaultIcon", KEY_WRITE)?;
+            let _icon_key = scheme_key.create_subkey_with_flags("DefaultIcon", KEY_WRITE).unwrap();
         }
         Err(err) => {
-            eprintln!(
-                "An error has occurred, please report it to Gooberblox via tickets: {}",
-                err
-            )
+             eprintln!("An error has occurred, please report it to Gooberblox via tickets: {}", err)
         }
     }
-    Ok(())
+    Ok("Hi".to_string())
+}
+
+
+fn get_query_param(url: &Url, key: &str) -> String {
+    url.query_pairs()
+        .find_map(|(k, v)| if k == key { Some(v.to_string()) } else { None })
+        .unwrap_or_default()
+}
+
+fn copy_executable(source: &Path, target: &Path) -> bool {
+    if let Err(err) = std::fs::copy(source, target) {
+        eprintln!("Error copying executable: {:?}", err);
+        false
+    } else {
+        true
+    }
 }
