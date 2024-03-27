@@ -143,7 +143,8 @@ async fn main() {
     .timeout(Duration::new(18446744073709551614, 0))
     .build()
     .expect("Hard Error");
-    
+    let exec_pathbuf = dirs::data_local_dir().expect("Hard Error").join("GooberBlox");
+
     clear_terminal_screen();
     execute!(stdout(), crossterm::terminal::SetSize(85, 27)).unwrap();
 
@@ -171,14 +172,24 @@ async fn main() {
                     let placeid = get_query_param(&url, "placeid");
                     let player_token = get_query_param(&url, "auth");
                     let game = get_query_param(&url, "game");
+                    let version = get_query_param(&url, "version");
                     let mut playerbeta_path = dirs::data_local_dir().expect("Err");
                     playerbeta_path.push("GooberBlox");
                     playerbeta_path.push("Roblox");
-                    playerbeta_path.push("2016");
+                    let year = match version.as_str() {
+                        "2016" => "2016",
+                        "2017" => "2017",
+                        // Add more versions if necessary
+                        _ => {
+                            eprintln!("Unsupported version: {}", version);
+                            return;
+                        }
+                    };
+                    let mut playerbeta_path = exec_pathbuf.join("Roblox").join(year);
                     playerbeta_path.push("GooberPlayerBeta.exe");
 
                     let _playerbeta = Command::new(playerbeta_path)
-                    .args([r"--authenticationUrl",r"http://goober.biz/login/negotiate.ashx",r"--authenticationTicket",&player_token,r"--joinScriptUrl",&format!(r"http://assetgema.goober.biz/game/placelauncher.ashx?request=RequestGame&placeId={placeid}&auth={player_token}&game={game}")])
+                    .args([r"--authenticationUrl",r"http://goober.biz/login/negotiate.ashx",r"--authenticationTicket",&player_token,r"--joinScriptUrl",&format!(r"http://assetgema.goober.biz/game/placelauncher.ashx?request=RequestGame&placeId={placeid}&auth={player_token}&game={game}&year={version}")])
                     .arg(r"--play")
                     .spawn()
                     .expect("Failed to start playerbeta!");
@@ -272,39 +283,40 @@ async fn hash_check(http_client: Client) {
 #[async_recursion]
 async fn install_further(year: &str) {
     let http_client = reqwest::Client::builder()
-    .timeout(Duration::new(18446744073709551614, 0))
-    .build()
-    .expect("Hard Error");
-    
+        .timeout(Duration::new(18446744073709551614, 0))
+        .build()
+        .expect("Hard Error");
+
     let base_url: &str = "goober.biz";
-    let setup_url : &str = &format!("setup.{}", base_url);
+    let setup_url: &str = &format!("setup.{}", base_url);
     let mut exec_pathbuf = dirs::data_local_dir().expect("Hard Error");
     let appdata_sub = "GooberBlox";
-    //let roblox_sub = "Roblox";
 
     exec_pathbuf.push(appdata_sub);
-    if !exec_pathbuf.join("Roblox").join("2016").exists() || !exec_pathbuf.join("GooberLauncher.exe").exists() {
-        let _ = create_dir_all(&exec_pathbuf.join("Roblox"));
-        let file_content = download_file(&http_client, &format!("http://{}/GooberClient.zip",&setup_url)).await.unwrap();
+    let year_folder = exec_pathbuf.join("Roblox").join(year);
+    if !year_folder.exists() {
+        let _ = create_dir_all(&year_folder);
+        let file_content = download_file(&http_client, &format!("http://{}/GooberClient{}.zip", &setup_url, year)).await.unwrap();
 
-        match zip_extract::extract(Cursor::new(file_content), &exec_pathbuf.join("Roblox").join("2016"), true) {
-            Ok(_) => { print_advanced("Installation finished..", 0) },
-            Err(err) => { 
-                let _ =  std::fs::remove_dir_all(&exec_pathbuf.join("Roblox").join("2016")); 
-                eprintln!("Error during extraction: {:?}", err) 
+        match zip_extract::extract(Cursor::new(file_content), &year_folder, true) {
+            Ok(_) => {
+                print_advanced(format!("Installation for {} finished..", year).as_str(), 0)
+            },
+            Err(err) => {
+                let _ = std::fs::remove_dir_all(&year_folder);
+                eprintln!("Error during extraction for {}: {:?}", year, err)
             },
         }
-    }
-    else {
-        //hash_check(http_client).await;
+    } else {
+        print_advanced(format!("{} folder already exists, skipping installation..", year).as_str(), 0);
     }
 }
 
 async fn install() -> Result<String, reqwest::Error> {
     let appdata_sub: &str = "GooberBlox";
-    let bootstrapper_filename :&str = "GooberLauncher.exe";
+    let bootstrapper_filename: &str = "GooberLauncher.exe";
     let uri_scheme: &str = "goober-player";
-    
+
     let hkcu_classes_key: RegKey = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Software\\Classes", KEY_WRITE).unwrap();
     let mut exec_pathbuf = dirs::data_local_dir().expect("Hard Error").join(&appdata_sub);
     if !exec_pathbuf.exists() {
@@ -313,15 +325,14 @@ async fn install() -> Result<String, reqwest::Error> {
     if !exec_pathbuf.join("Roblox").join("2016").exists() || !exec_pathbuf.join(&bootstrapper_filename).exists() {
         if let Ok(executable_path) = &env::current_exe() {
             if let Ok(_executable_file) = std::fs::File::open(&executable_path) {
-            if copy_executable(&executable_path, &exec_pathbuf.join(&bootstrapper_filename)) {
-                print_advanced("Starting installation..", 0);
-                install_further("2016").await;
-            }
-            else {
-                panic!("Unable to install, make a ticket for help.");
-            }
-            }
-            else {
+                if copy_executable(&executable_path, &exec_pathbuf.join(&bootstrapper_filename)) {
+                    print_advanced("Starting installation..", 0);
+                    install_further("2016").await;
+                    install_further("2017").await; // Add this line
+                } else {
+                    panic!("Unable to install, make a ticket for help.");
+                }
+            } else {
                 eprintln!("executable path couldnt be grabbed");
             }
         }
@@ -334,17 +345,18 @@ async fn install() -> Result<String, reqwest::Error> {
             scheme_key.set_value("", &format!("URL {} Protocol", uri_scheme)).unwrap();
             scheme_key.set_value("URL Protocol", &"").unwrap();
 
-            let (command_key,_) = scheme_key.create_subkey_with_flags("shell\\open\\command", KEY_WRITE).unwrap();
+            let (command_key, _) = scheme_key.create_subkey_with_flags("shell\\open\\command", KEY_WRITE).unwrap();
             command_key.set_value("", &exec_keypath).unwrap();
 
             let _icon_key = scheme_key.create_subkey_with_flags("DefaultIcon", KEY_WRITE).unwrap();
         }
         Err(err) => {
-             eprintln!("An error has occurred, please report it to Gooberblox via tickets: {}", err)
+            eprintln!("An error has occurred, please report it to Gooberblox via tickets: {}", err)
         }
     }
     Ok("Hi".to_string())
 }
+
 
 
 fn get_query_param(url: &Url, key: &str) -> String {
