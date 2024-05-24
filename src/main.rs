@@ -330,7 +330,7 @@ async fn install() -> Result<String, reqwest::Error> {
                     print_advanced("Starting installation..", 0);
                     install_further("2016").await;
                     install_further("2017").await; // Add this line
-                    install_further("2019").await; 
+                    install_further("2019").await;
                 } else {
                     panic!("Unable to install, make a ticket for help.");
                 }
