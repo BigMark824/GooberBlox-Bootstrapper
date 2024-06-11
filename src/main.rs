@@ -65,7 +65,6 @@ pub async fn download_file(client: &Client, url: &str) -> Result<Vec<u8>, reqwes
     let response = client.get(url).send().await?;
     let content_length = response.content_length().unwrap_or(0);
 
-    // Create a progress bar
     let progress_bar = ProgressBar::new(content_length);
     progress_bar.set_style(
         ProgressStyle::default_bar()
@@ -105,19 +104,15 @@ fn write_file(file_content: &[u8], path: &PathBuf) -> File {
 
 #[cfg(target_os = "windows")]
 fn seek_write_with_progress(file_content: &mut Vec<u8>, chunk: Vec<u8>, progress_bar: &ProgressBar) {
-    // Seek to the end of the file content and write the chunk
     file_content.extend_from_slice(&chunk);
 
-    // Update progress bar
     progress_bar.inc(chunk.len() as u64);
 }
 
 #[cfg(not(target_os = "windows"))]
 fn write_at_with_progress(file_content: &mut Vec<u8>, chunk: Vec<u8>, progress_bar: &ProgressBar) {
-    // Write the chunk at the end of the file content
     file_content.extend_from_slice(&chunk);
 
-    // Update progress bar
     progress_bar.inc(chunk.len() as u64);
 }
 
@@ -170,9 +165,9 @@ async fn main() {
                 let uri_str = arg;
                 if let Ok(url) = Url::parse(&uri_str) {
                     let placeid = get_query_param(&url, "placeid");
-                    let player_token = get_query_param(&url, "auth");
-                    let game = get_query_param(&url, "game");
+                    let player_token = get_query_param(&url, "token");
                     let version = get_query_param(&url, "version");
+                    let datacentreId = get_query_param(&url, "d");
                     let mut playerbeta_path = dirs::data_local_dir().expect("Err");
                     playerbeta_path.push("GooberBlox");
                     playerbeta_path.push("Roblox");
@@ -180,7 +175,6 @@ async fn main() {
                         "2016" => "2016",
                         "2017" => "2017",
                         "2019" => "2019",
-                        // Add more versions if necessary
                         _ => {
                             eprintln!("Unsupported version: {}", version);
                             return;
@@ -190,7 +184,7 @@ async fn main() {
                     playerbeta_path.push("GooberPlayerBeta.exe");
 
                     let _playerbeta = Command::new(playerbeta_path)
-                    .args([r"--authenticationUrl",r"http://goober.biz/login/negotiate.ashx",r"--authenticationTicket",&player_token,r"--joinScriptUrl",&format!(r"http://assetgema.goober.biz/game/placelauncher.ashx?request=RequestGame&placeId={placeid}&auth={player_token}&game={game}&year={version}")])
+                    .args([r"--authenticationUrl",r"http://goober.lol/login/negotiate.ashx",r"--authenticationTicket",&player_token,r"--joinScriptUrl",&format!(r"http://assetgame.goober.lol/game/placelauncher.ashx?request=RequestGame&placeId={placeid}&t={player_token}&year={version}&datacentreId={datacentreId}")])
                     .arg(r"--play")
                     .spawn()
                     .expect("Failed to start playerbeta!");
@@ -210,7 +204,7 @@ async fn main() {
 }
 
 async fn hash_check(http_client: Client) {
-    let base_url: &str = "goober.biz";
+    let base_url: &str = "goober.lol";
     let setup_url : &str = &format!("setup.{}", base_url);
     let mut exec_pathbuf = dirs::data_local_dir().expect("Hard Error").join("GooberBlox");
     let mut playerbeta_path = exec_pathbuf.join("Roblox").join("2016");
@@ -288,7 +282,7 @@ async fn install_further(year: &str) {
         .build()
         .expect("Hard Error");
 
-    let base_url: &str = "goober.biz";
+    let base_url: &str = "goober.lol";
     let setup_url: &str = &format!("setup.{}", base_url);
     let mut exec_pathbuf = dirs::data_local_dir().expect("Hard Error");
     let appdata_sub = "GooberBlox";
